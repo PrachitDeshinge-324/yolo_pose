@@ -1,0 +1,6 @@
+# Ignore all model weight files
+*.h5
+*.ckpt
+*.pth
+*.pt
+*.weights

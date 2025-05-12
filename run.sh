@@ -1,0 +1,1 @@
+python main.py --video '../Person_New/input/3c' --output_features industrial_gait_features.csv
