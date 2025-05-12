@@ -344,17 +344,40 @@ class GaitValidator:
         
         # Scale and transform feature vector
         feature_vector = np.array(feature_vector).reshape(1, -1)
-        feature_scaled = self.scaler.transform(feature_vector)
         
-        if self.pca is not None:
-            feature_scaled = self.pca.transform(feature_scaled)
+        # Handle feature count mismatch
+        expected_features = self.scaler.n_features_in_
+        actual_features = feature_vector.shape[1]
         
-        # Get prediction and probabilities
-        prediction = self.classifier.predict(feature_scaled)[0]
-        probabilities = self.classifier.predict_proba(feature_scaled)[0]
-        confidence = np.max(probabilities)
+        if actual_features != expected_features:
+            print(f"Feature count mismatch: got {actual_features}, expected {expected_features}")
+            
+            # Create properly sized feature vector
+            if actual_features < expected_features:
+                # Pad with zeros if we have too few features
+                padded_vector = np.zeros((1, expected_features))
+                padded_vector[0, :actual_features] = feature_vector[0]
+                feature_vector = padded_vector
+            else:
+                # Truncate if we have too many features
+                feature_vector = feature_vector[:, :expected_features]
         
-        if confidence < confidence_threshold:
-            return "Unknown", confidence
-        
-        return prediction, confidence
+        try:
+            # Apply transformations
+            feature_scaled = self.scaler.transform(feature_vector)
+            
+            if self.pca is not None:
+                feature_scaled = self.pca.transform(feature_scaled)
+            
+            # Get prediction and probabilities
+            prediction = self.classifier.predict(feature_scaled)[0]
+            probabilities = self.classifier.predict_proba(feature_scaled)[0]
+            confidence = np.max(probabilities)
+            
+            if confidence < confidence_threshold:
+                return "Unknown", confidence
+            
+            return prediction, confidence
+        except Exception as e:
+            print(f"Error during identification: {str(e)}")
+            return "Error", 0.0

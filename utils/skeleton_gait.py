@@ -860,20 +860,33 @@ class GaitFeatureExtractor:
         return angle
     
     def export_features_csv(self, filename):
-        """Export all gait features to a CSV file"""
-        records = []
+        """Export all gait features to CSV file"""
+        data = []
         
         for track_id, features in self.gait_features.items():
-            record = {'track_id': track_id}
-            record.update(features)
-            records.append(record)
+            # Ensure all expected features are present
+            features_with_id = {'track_id': track_id}
+            features_with_id.update(features)
+            data.append(features_with_id)
         
-        if records:
-            df = pd.DataFrame(records)
+        if data:
+            df = pd.DataFrame(data)
+            
+            # Check feature count
+            expected_features = 26  # Update this to match your expected count
+            actual_features = len(df.columns) - 1  # -1 for track_id
+            
+            if actual_features < expected_features:
+                print(f"WARNING: Only extracted {actual_features}/{expected_features} features")
+                # Identify missing features
+                print(f"Missing features may affect identification accuracy")
+                
             df.to_csv(filename, index=False)
+            print(f"Exported {len(data)} gait feature records with {actual_features} features")
             return True
-        
-        return False
+        else:
+            print("No gait features to export")
+            return False
 
     def get_feature_vector(self, track_id):
         """Get a normalized feature vector for machine learning models"""
