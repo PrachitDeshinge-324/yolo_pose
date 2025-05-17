@@ -39,6 +39,10 @@ def parse_args():
                        help="Buffer size ratio around detected person (default: 0.1)")
     parser.add_argument("--export_sequences", action="store_true",
                        help="Export skeleton sequences for LSTM training")
+    parser.add_argument("--save_crops", action="store_true",
+                    help="Save person crops for each track ID")
+    parser.add_argument("--crops_dir", type=str, default="person_crops",
+                    help="Directory to save person crops")
     return parser.parse_args()
 
 
@@ -181,7 +185,7 @@ if __name__ == "__main__":
     
     with tqdm.tqdm(total=total_frames-start_frame, desc="Processing frames") as pbar:
     # Process video with tracking
-        while cap.isOpened() and frame_count<1000:
+        while cap.isOpened() and frame_count<300:
             ret, frame = cap.read()
             if not ret:
                 break
@@ -319,6 +323,43 @@ if __name__ == "__main__":
                                             (int(smoothed_keypoints[p1][0]) + x1_buf, int(smoothed_keypoints[p1][1]) + y1_buf), 
                                             (int(smoothed_keypoints[p2][0]) + x1_buf, int(smoothed_keypoints[p2][1]) + y1_buf),
                                             color, 1)
+                                    
+                            if args.save_crops:
+                                # Create directory if it doesn't exist
+                                os.makedirs(args.crops_dir, exist_ok=True)
+                                
+                                # Create a copy of the crop to draw on
+                                vis_crop = person_crop.copy()
+                                
+                                # Draw the skeleton on the crop
+                                for i, point in enumerate(smoothed_keypoints):
+                                    if point[0] > 0 and point[1] > 0:
+                                        # Convert keypoints from full frame coordinates to crop coordinates
+                                        px = int(point[0]) - x1_buf
+                                        py = int(point[1]) - y1_buf
+                                        
+                                        # Draw circle at keypoint
+                                        cv.circle(vis_crop, (px, py), 3, JOINT_COLORS[i % len(JOINT_COLORS)], -1)
+                                
+                                # Draw connections between keypoints
+                                for pair in SKELETON:
+                                    p1, p2 = pair[0] - 1, pair[1] - 1  # COCO format to 0-indexed
+                                    if (p1 < len(smoothed_keypoints) and p2 < len(smoothed_keypoints) and
+                                        smoothed_keypoints[p1][0] > 0 and smoothed_keypoints[p1][1] > 0 and
+                                        smoothed_keypoints[p2][0] > 0 and smoothed_keypoints[p2][1] > 0):
+                                        
+                                        # Convert keypoints to crop coordinates
+                                        x1 = int(smoothed_keypoints[p1][0]) - x1_buf
+                                        y1 = int(smoothed_keypoints[p1][1]) - y1_buf
+                                        x2 = int(smoothed_keypoints[p2][0]) - x1_buf
+                                        y2 = int(smoothed_keypoints[p2][1]) - y1_buf
+                                        
+                                        # Draw line between keypoints
+                                        cv.line(vis_crop, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                                
+                                # Save crop with visualization
+                                crop_filename = f"{args.crops_dir}/track_{track_id}_frame_{frame_count}.jpg"
+                                cv.imwrite(crop_filename, vis_crop)
 
             # Write frame to video if output is specified
             if video_writer:

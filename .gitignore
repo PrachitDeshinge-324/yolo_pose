@@ -19,4 +19,9 @@
 # Ignore all log files
 *.log
 *.json
-/lstm_results
+*.npy
+
+# Ignore specific folders
+lstm_results/
+identity_samples/
+person_crops/
