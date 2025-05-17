@@ -4,3 +4,11 @@
 *.pth
 *.pt
 *.weights
+
+# Ignore all videos and images
+*.mp4
+*.avi
+*.mov
+*.jpg
+*.jpeg
+*.png
