@@ -12,3 +12,11 @@
 *.jpg
 *.jpeg
 *.png
+
+# Ignore all csv files
+*.csv
+
+# Ignore all log files
+*.log
+*.json
+/lstm_results

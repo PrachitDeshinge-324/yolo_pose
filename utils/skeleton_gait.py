@@ -4,6 +4,9 @@ from collections import defaultdict
 from scipy.signal import find_peaks, savgol_filter
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
 
 
 class GaitFeatureExtractor:
@@ -932,7 +935,208 @@ class GaitFeatureExtractor:
         vector = np.nan_to_num(vector, nan=0.0)
         
         return vector
+    
+    def get_keypoint_sequences(self):
+        """Extract raw keypoint sequences for each track ID"""
+        sequences = {}
+        
+        for track_id, history in self.track_history.items():
+            if len(history) < self.min_frames_for_analysis:
+                continue
+            
+            # Extract keypoints in sequence
+            keypoints_seq = []
+            for _, kpts in history:
+                if kpts is not None and len(kpts) > 0:
+                    # Flatten keypoints to a single vector [x1,y1,x2,y2,...,xn,yn]
+                    flattened = []
+                    for i in range(len(kpts)):
+                        if self.is_valid_keypoint(kpts[i]):
+                            flattened.extend(kpts[i])
+                        else:
+                            # Add zeros for missing keypoints
+                            flattened.extend([0, 0])
+                    keypoints_seq.append(flattened)
+            
+            if keypoints_seq:
+                sequences[track_id] = keypoints_seq
+        
+        return sequences
 
+    def export_sequences_for_lstm(self, filename):
+        """Export skeleton sequences to a file for LSTM training"""
+        sequences = self.get_keypoint_sequences()
+        
+        if sequences:
+            # Save using torch.save or numpy
+            np.save(filename, sequences)
+            print(f"Exported {len(sequences)} skeleton sequences")
+            return True
+        else:
+            print("No sequences to export")
+            return False
+
+    def normalize_keypoints(self, keypoints_seq):
+        """Normalize keypoints for neural network input"""
+        # Center keypoints around hip center
+        normalized = []
+        
+        for keypoints in keypoints_seq:
+            if len(keypoints) > self.left_hip and len(keypoints) > self.right_hip:
+                hip_center = (keypoints[self.left_hip] + keypoints[self.right_hip]) / 2
+                
+                # Shift to center
+                centered = [kp - hip_center if self.is_valid_keypoint(kp) else np.zeros(2) for kp in keypoints]
+                
+                # Scale by the hip-shoulder distance for size invariance
+                if (len(keypoints) > self.left_shoulder and 
+                    len(keypoints) > self.right_shoulder and
+                    self.is_valid_keypoint(keypoints[self.left_shoulder]) and
+                    self.is_valid_keypoint(keypoints[self.right_shoulder])):
+                    
+                    shoulder_center = (keypoints[self.left_shoulder] + keypoints[self.right_shoulder]) / 2
+                    scale_factor = np.linalg.norm(shoulder_center - hip_center)
+                    
+                    if scale_factor > 0:
+                        normalized_kpts = [kp / scale_factor for kp in centered]
+                        normalized.append(normalized_kpts)
+        
+        return normalized
+
+
+class SkeletonSequence(Dataset):
+    """Dataset class for skeleton sequences with corresponding person IDs"""
+    
+    def __init__(self, sequences, labels, seq_length=30, transform=None):
+        """
+        Args:
+            sequences: Dictionary mapping track_id to list of keypoints sequences
+            labels: Dictionary mapping track_id to person identity
+            seq_length: Fixed sequence length for LSTM input
+            transform: Optional transform to apply to sequences
+        """
+        self.sequences = []
+        self.labels = []
+        self.label_map = {}  # Maps string labels to integers
+        self.inv_label_map = {}  # Inverse mapping
+        self.seq_length = seq_length
+        self.transform = transform
+        
+        # Process sequences and labels
+        label_idx = 0
+        for track_id, seq in sequences.items():
+            if track_id in labels:
+                # Create fixed-length sequences
+                for i in range(0, max(1, len(seq) - seq_length + 1), seq_length // 2):  # 50% overlap
+                    # Extract sequence chunk
+                    end_idx = min(i + seq_length, len(seq))
+                    if end_idx - i < seq_length // 2:  # Skip if too short
+                        continue
+                        
+                    chunk = seq[i:end_idx]
+                    
+                    # Pad if necessary
+                    if len(chunk) < seq_length:
+                        # Pad with zeros
+                        pad_size = seq_length - len(chunk)
+                        chunk = chunk + [np.zeros_like(chunk[0])] * pad_size
+                    
+                    # Add to dataset
+                    self.sequences.append(chunk)
+                    
+                    # Process label
+                    label = labels[track_id]
+                    if label not in self.label_map:
+                        self.label_map[label] = label_idx
+                        self.inv_label_map[label_idx] = label
+                        label_idx += 1
+                    
+                    self.labels.append(self.label_map[label])
+    
+    def __len__(self):
+        return len(self.sequences)
+    
+    def __getitem__(self, idx):
+        seq = self.sequences[idx]
+        label = self.labels[idx]
+        
+        # Convert to tensor
+        seq = np.array(seq)
+        
+        # Apply transform if available
+        if self.transform:
+            seq = self.transform(seq)
+        
+        # Convert to tensor
+        seq_tensor = torch.tensor(seq, dtype=torch.float32)
+        label_tensor = torch.tensor(label, dtype=torch.long)
+        
+        return seq_tensor, label_tensor
+    
+    def get_num_classes(self):
+        """Return the number of unique classes"""
+        return len(self.label_map)
+    
+    def get_label_mapping(self):
+        """Return the label mapping dictionary"""
+        return self.inv_label_map
+    
+class SkeletonLSTM(nn.Module):
+    """LSTM model for skeleton sequence classification"""
+    
+    def __init__(self, input_size, hidden_size, num_layers, num_classes, dropout=0.2):
+        """
+        Args:
+            input_size: Number of features in input (keypoints x 2)
+            hidden_size: Size of LSTM hidden states
+            num_layers: Number of LSTM layers
+            num_classes: Number of output classes
+            dropout: Dropout probability
+        """
+        super(SkeletonLSTM, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        
+        # LSTM layers
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, 
+                           batch_first=True, dropout=dropout if num_layers > 1 else 0)
+        
+        # Attention layer
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.Tanh(),
+            nn.Linear(hidden_size // 2, 1)
+        )
+        
+        # Classification layers
+        self.fc = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size // 2, num_classes)
+        )
+        
+    def forward(self, x):
+        # x shape: (batch_size, sequence_length, input_size)
+        
+        # LSTM output
+        lstm_out, _ = self.lstm(x)
+        # lstm_out shape: (batch_size, sequence_length, hidden_size)
+        
+        # Attention mechanism
+        attn_weights = self.attention(lstm_out)
+        attn_weights = torch.softmax(attn_weights, dim=1)
+        # attn_weights shape: (batch_size, sequence_length, 1)
+        
+        # Apply attention to LSTM output
+        context = torch.sum(lstm_out * attn_weights, dim=1)
+        # context shape: (batch_size, hidden_size)
+        
+        # Classification
+        output = self.fc(context)
+        # output shape: (batch_size, num_classes)
+        
+        return output
 
 # Helper function to visualize gait features on frame
 def visualize_gait_features(frame, track_id, gait_features, x_pos, y_pos):
