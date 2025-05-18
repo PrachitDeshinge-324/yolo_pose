@@ -13,7 +13,7 @@
 python main.py \
   --video "../Person_New/input/3c.mp4" \
   --start_frame 0\
-  --end_frame 1000 \
+  --end_frame 300 \
   --headless \
   --buffer_size 0.05 \
   --output_video "temp_osnet_ain_1.mp4" \

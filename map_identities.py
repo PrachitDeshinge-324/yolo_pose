@@ -35,6 +35,8 @@ def parse_args():
                     help="JSON file containing bounding box information")
     parser.add_argument("--use_bbox_info", action="store_true", default=True,
                     help="Use bounding box information to extract crops on-demand")
+    parser.add_argument("--merged_output", type=str, default=None,
+                    help="Output path for merged numpy file (default: features_flat_merged.npy)")
     return parser.parse_args()
 
 def extract_frame_samples(video_path, track_data, frames_dir, num_samples=3):
@@ -284,6 +286,96 @@ def save_identity_sequences(features_df, identity_tracks, sequences_dir):
     
     return True
 
+def save_identity_sequences_from_flat(flat_npy_path, identity_tracks, sequences_dir):
+    """Save merged keypoint+feature sequences for each identity from the flat npy array."""
+    if not os.path.exists(sequences_dir):
+        os.makedirs(sequences_dir, exist_ok=True)
+    # Load the flat numpy array
+    data = np.load(flat_npy_path)
+    # track_id is always the first column
+    for identity, track_ids in identity_tracks.items():
+        # Select rows where track_id is in this identity's tracks
+        mask = np.isin(data[:, 0], track_ids)
+        merged = data[mask].copy()
+        # Change track_id column to a unique value for this identity (e.g., use min(track_ids) or a hash)
+        merged[:, 0] = min(track_ids)  # or use: hash(identity) % 1e6
+        # Save merged array
+        out_path = os.path.join(sequences_dir, f"{identity}_sequence.npy")
+        np.save(out_path, merged)
+        print(f"Saved {merged.shape[0]} frames for identity '{identity}' to {out_path}")
+    return True
+
+def merge_tracks_in_flat_npy(flat_npy_path, identity_tracks, output_path=None):
+    """
+    Merge track IDs in the flat numpy array based on identity mappings
+    and save a new numpy file with merged data.
+    
+    Parameters:
+    - flat_npy_path: Path to the flat numpy array
+    - identity_tracks: Dictionary mapping identity names to lists of track IDs
+    - output_path: Path to save the merged numpy array (if None, uses _merged suffix)
+    
+    Returns:
+    - Path to the saved merged numpy array
+    """
+    if not os.path.exists(flat_npy_path):
+        print(f"Error: Flat numpy file {flat_npy_path} not found")
+        return None
+    
+    # Set default output path if not provided
+    if output_path is None:
+        basename = os.path.basename(flat_npy_path)
+        dirname = os.path.dirname(flat_npy_path)
+        name_without_ext = os.path.splitext(basename)[0]
+        output_path = os.path.join(dirname, f"{name_without_ext}_merged.npy")
+    
+    # Load the flat numpy array
+    print(f"Loading data from {flat_npy_path}...")
+    data = np.load(flat_npy_path)
+    print(f"Loaded array with shape {data.shape}")
+    
+    # Make a copy to avoid modifying the original
+    merged_data = data.copy()
+    
+    # Create a mapping from original track IDs to merged IDs
+    track_to_merged_id = {}
+    identity_to_merged_id = {}
+    
+    # For each identity, assign a merged ID (using min track ID as the merged ID)
+    for identity, track_ids in identity_tracks.items():
+        if not track_ids:
+            continue
+        
+        # Use minimum track ID as the merged ID for this identity
+        merged_id = min(track_ids)
+        identity_to_merged_id[identity] = merged_id
+        
+        # Map all track IDs to this merged ID
+        for track_id in track_ids:
+            track_to_merged_id[track_id] = merged_id
+    
+    # Update the track IDs in the data
+    # First column is assumed to be the track_id
+    for i in range(len(merged_data)):
+        track_id = int(merged_data[i, 0])
+        if track_id in track_to_merged_id:
+            merged_data[i, 0] = track_to_merged_id[track_id]
+    
+    # Save the merged data
+    print(f"Saving merged data to {output_path}...")
+    np.save(output_path, merged_data)
+    print(f"Saved merged data with shape {merged_data.shape}")
+    
+    # Print a summary of the merges
+    print("\nMerge summary:")
+    for identity, track_ids in identity_tracks.items():
+        if not track_ids:
+            continue
+        merged_id = identity_to_merged_id[identity]
+        print(f"- {identity}: Merged {len(track_ids)} tracks to ID {merged_id}")
+        
+    return output_path
+
 def main():
     args = parse_args()
     
@@ -394,7 +486,19 @@ def main():
     # Save sequences if requested
     if args.save_sequences:
         print("\nSaving identity sequences...")
-        save_identity_sequences(features_df, identity_tracks, args.sequences_dir)
+        # Use the new flat npy file if it exists
+        flat_npy = args.features.replace('.csv', '_flat.npy')
+        if os.path.exists(flat_npy):
+            save_identity_sequences_from_flat(flat_npy, identity_tracks, args.sequences_dir)
+        else:
+            save_identity_sequences(features_df, identity_tracks, args.sequences_dir)
+    
+    # Always merge tracks in the flat numpy file if it exists
+    flat_npy = args.features.replace('.csv', '_flat.npy')
+    if os.path.exists(flat_npy):
+        print("\nMerging tracks in flat numpy file...")
+        merged_path = merge_tracks_in_flat_npy(flat_npy, identity_tracks, args.merged_output)
+        print(f"Saved merged data to {merged_path}")
     
     # Save mappings
     with open(args.output, 'w') as f:

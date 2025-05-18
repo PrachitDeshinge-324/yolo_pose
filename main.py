@@ -415,6 +415,67 @@ if __name__ == "__main__":
         gait_analyzer.export_sequences_for_lstm(seq_file)
         print(f"Exported skeleton sequences to {seq_file}")
 
+    # --- Save combined keypoints and features in a single npy file ---
+    combined_data = {}
+    # Get all keypoint sequences
+    keypoint_sequences = gait_analyzer.get_keypoint_sequences()
+    # For each track, store both keypoints and features
+    for track_id in keypoint_sequences:
+        features = gait_analyzer.get_features(track_id)
+        combined_data[track_id] = {
+            "keypoints": keypoint_sequences[track_id],
+            "features": features if features is not None else {}
+        }
+    # Save to npy file
+    combined_npy_file = args.output_features.replace('.csv', '_combined.npy')
+    np.save(combined_npy_file, combined_data)
+    print(f"Saved combined keypoints and features to {combined_npy_file}")
+
+    # --- Save all data as a single numpy array: [track_id, frame_number, keypoints..., features...] ---
+    all_rows = []
+    feature_keys = None
+    # First, collect all possible feature keys across all tracks for global consistency
+    all_feature_keys = set()
+    for track_id in gait_analyzer.track_history:
+        features = gait_analyzer.get_features(track_id)
+        if features is not None:
+            all_feature_keys.update([k for k, v in features.items() if isinstance(v, (int, float, np.floating, np.integer))])
+    feature_keys = sorted(all_feature_keys)
+
+    # Save feature order to a .txt file for reproducibility
+    feature_order_path = args.output_features.replace('.csv', '_feature_order.txt')
+    with open(feature_order_path, 'w') as f:
+        for k in feature_keys:
+            f.write(f"{k}\n")
+    print(f"Saved feature order to {feature_order_path}")
+
+    # For each track, get per-frame keypoints and features
+    for track_id, history in gait_analyzer.track_history.items():
+        features = gait_analyzer.get_features(track_id)
+        # Prepare feature vector for this track, filling missing features with np.nan
+        if features is not None:
+            feature_vec = np.array([
+                features[k] if (k in features and isinstance(features[k], (int, float, np.floating, np.integer))) else np.nan
+                for k in feature_keys
+            ], dtype=np.float32)
+        else:
+            feature_vec = np.full(len(feature_keys), np.nan, dtype=np.float32)
+        for frame_idx, kpts in history:
+            # Flatten keypoints [x1, y1, x2, y2, ...]
+            flat_kpts = []
+            for pt in kpts:
+                if isinstance(pt, np.ndarray) and pt.size == 2:
+                    flat_kpts.extend(pt.tolist())
+                else:
+                    flat_kpts.extend([0, 0])
+            row = [int(track_id), int(frame_idx)] + flat_kpts + feature_vec.tolist()
+            all_rows.append(row)
+    # Save as numpy array
+    all_rows_np = np.array(all_rows, dtype=np.float32)
+    np.save(args.output_features.replace('.csv', '_flat.npy'), all_rows_np)
+    print(f"Saved flat numpy array with id, frame, keypoints, features to {args.output_features.replace('.csv', '_flat.npy')}")
+    # NOTE: Downstream code should always read the feature order from the .txt file to reconstruct feature columns correctly.
+
     # Clean up resources
     cap.release()
     if video_writer:
