@@ -13,9 +13,11 @@
 python main.py \
   --video "../Person_New/input/3c.mp4" \
   --start_frame 0\
+  --end_frame 1000 \
   --headless \
   --buffer_size 0.05 \
   --output_video "temp_osnet_ain_1.mp4" \
   --export_sequences \
   --output_features "gait_features.csv" \
-  --save_crops
+  --save_bbox_info
+  # --save_crops

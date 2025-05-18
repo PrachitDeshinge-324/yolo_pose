@@ -23,15 +23,18 @@ def parse_args():
                        help="Save keypoint sequences for each identity")
     parser.add_argument("--sequences_dir", type=str, default="identity_sequences",
                        help="Directory to save identity sequences")
-    parser.add_argument("--show_plots", action="store_true",
+    parser.add_argument("--show_plots", action="store_true", default=True,
                        help="Show feature plots for each track (requires GUI)")
     parser.add_argument("--num_samples", type=int, default=3,
                        help="Number of sample frames to show for each track")
-    # Add to the argument parser:
     parser.add_argument("--crops_dir", type=str, default="person_crops",
                     help="Directory to find saved person crops")
-    parser.add_argument("--use_saved_crops", action="store_true",
+    parser.add_argument("--use_saved_crops", action="store_true", default=True,
                     help="Use pre-saved crops instead of extracting new frames")
+    parser.add_argument("--bbox_info", type=str, default="bbox_info.json",
+                    help="JSON file containing bounding box information")
+    parser.add_argument("--use_bbox_info", action="store_true", default=True,
+                    help="Use bounding box information to extract crops on-demand")
     return parser.parse_args()
 
 def extract_frame_samples(video_path, track_data, frames_dir, num_samples=3):
@@ -75,17 +78,86 @@ def extract_frame_samples(video_path, track_data, frames_dir, num_samples=3):
     cap.release()
     return sample_paths
 
+def extract_crops_from_bbox(video_path, bbox_data, track_id, num_samples=3):
+    """Extract crops from original video using saved bounding box coordinates"""
+    if not os.path.exists(video_path):
+        print(f"Video file not found: {video_path}")
+        return []
+    
+    if not bbox_data or str(track_id) not in bbox_data:
+        print(f"No bounding box data found for track {track_id}")
+        return []
+    
+    # Get bbox data for this track
+    track_boxes = bbox_data[str(track_id)]
+    
+    # Verify that track IDs match (defensive check)
+    verified_boxes = []
+    for box in track_boxes:
+        # If track_id is stored in the box info, verify it matches
+        if 'track_id' in box and int(box['track_id']) == int(track_id):
+            verified_boxes.append(box)
+        # If no track_id in the box info (for backward compatibility)
+        elif 'track_id' not in box:
+            verified_boxes.append(box)
+    
+    # If we filtered out all boxes, use the original list (backward compatibility)
+    if not verified_boxes and track_boxes:
+        verified_boxes = track_boxes
+    
+    # Select frames to sample
+    if len(verified_boxes) <= num_samples:
+        selected_boxes = verified_boxes
+    else:
+        # Evenly space the samples
+        indices = np.linspace(0, len(verified_boxes)-1, num_samples, dtype=int)
+        selected_boxes = [verified_boxes[i] for i in indices]
+    
+    # Open the video and extract crops
+    crops_data = []
+    cap = cv2.VideoCapture(video_path)
+    
+    for box_info in selected_boxes:
+        frame_idx = box_info['frame_idx']
+        x1, y1, x2, y2 = box_info['x1'], box_info['y1'], box_info['x2'], box_info['y2']
+        
+        # Set frame position
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        
+        if ret:
+            # Extract crop
+            crop = frame[y1:y2, x1:x2]
+            
+            # Generate a temporary path to return
+            crops_data.append({
+                'crop': crop,
+                'frame_idx': frame_idx,
+                'track_id': track_id  # Ensure track_id is included here
+            })
+    
+    cap.release()
+    return crops_data
+
 def display_track_summary(df_track, track_id, show_plots=False, 
                          video_path=None, frames_dir=None, num_samples=3,
-                         crops_dir=None, use_saved_crops=False):
+                         crops_dir=None, use_saved_crops=False,
+                         bbox_info=None, use_bbox_info=False):
     """Display a summary of track information to help with identification"""
     print(f"\n===== Track ID: {track_id} =====")
     
     # Extract and display sample frames/crops
     sample_paths = []
+    crops_data = []
     
-    # Check for saved crops first if requested
-    if use_saved_crops and crops_dir and os.path.exists(crops_dir):
+    # First try using bbox info if requested
+    if use_bbox_info and bbox_info and video_path:
+        crops_data = extract_crops_from_bbox(video_path, bbox_info, track_id, num_samples)
+        if crops_data:
+            print(f"Extracted {len(crops_data)} crops using bbox information for track {track_id}")
+    
+    # If no bbox data, check for saved crops
+    if not crops_data and use_saved_crops and crops_dir and os.path.exists(crops_dir):
         # Look for any crops for this track ID
         crop_pattern = f"track_{track_id}_frame_*.jpg"
         crop_files = glob.glob(os.path.join(crops_dir, crop_pattern))
@@ -103,29 +175,67 @@ def display_track_summary(df_track, track_id, show_plots=False,
                 
             print(f"Found {len(sample_paths)} saved crops for track {track_id}")
     
-    # Fall back to extracting frames if no crops found or not using saved crops
-    if not sample_paths and video_path and frames_dir:
+    # Fall back to extracting frames only if no other option worked
+    if not crops_data and not sample_paths and video_path and frames_dir:
         sample_paths = extract_frame_samples(video_path, df_track, frames_dir, num_samples)
         if sample_paths:
             print(f"Extracted {len(sample_paths)} sample frames from video")
     
-    # Display the frames if show_plots is enabled and we have samples
-    if show_plots and sample_paths:
+    # Display the frames/crops if show_plots is enabled
+    if show_plots:
         plt.figure(figsize=(15, 5))
-        for i, img_path in enumerate(sample_paths):
-            img = cv2.imread(img_path)
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB for matplotlib
-            plt.subplot(1, len(sample_paths), i+1)
-            plt.imshow(img)
-            
-            # Get frame number from filename
-            frame_num = os.path.basename(img_path).split('_frame_')[1].split('.')[0]
-            plt.title(f"Frame {frame_num}")
-            plt.axis('off')
         
-        plt.suptitle(f"Track ID {track_id} {'Crops' if 'crops' in sample_paths[0] else 'Frames'}")
+        # Display either crops from bbox data or from files
+        if crops_data:
+            for i, crop_info in enumerate(crops_data):
+                crop = crop_info['crop']
+                frame_idx = crop_info['frame_idx']
+                # Use the track_id from crop_info if available
+                crop_track_id = crop_info.get('track_id', track_id)
+                
+                # Convert BGR to RGB for matplotlib
+                crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                
+                plt.subplot(1, len(crops_data), i+1)
+                plt.imshow(crop_rgb)
+                plt.title(f"ID:{crop_track_id} Frame:{frame_idx}")
+                plt.axis('off')
+            
+            plt.suptitle(f"Track ID {track_id} Crops")
+        
+        elif sample_paths:
+            for i, img_path in enumerate(sample_paths):
+                img = cv2.imread(img_path)
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB for matplotlib
+                plt.subplot(1, len(sample_paths), i+1)
+                plt.imshow(img)
+                
+                # Get frame number from filename
+                frame_num = os.path.basename(img_path).split('_frame_')[1].split('.')[0]
+                plt.title(f"Frame {frame_num}")
+                plt.axis('off')
+            
+            plt.suptitle(f"Track ID {track_id} {'Crops' if 'crops' in sample_paths[0] else 'Frames'}")
+        
         plt.tight_layout()
-        plt.show()
+        
+        # Check for Colab environment by looking for common environment variables
+        is_colab = 'COLAB_GPU' in os.environ or 'COLAB_TPU_ADDR' in os.environ
+        
+        if is_colab:
+            # For Colab, we need to make the plot display non-blocking
+            try:
+                plt.show(block=False)
+                # Small pause to ensure the plot is displayed
+                import time
+                time.sleep(0.5)
+            except Exception:
+                plt.show()
+        else:
+            # Normal display for non-Colab environments
+            plt.show()
+        
+    return len(crops_data) > 0 or len(sample_paths) > 0
 
 def merge_identity_tracks(features_df, identities):
     """
@@ -199,8 +309,34 @@ def main():
             except json.JSONDecodeError:
                 print("Error reading existing identity file. Starting fresh.")
     
+    # Load bbox information if requested
+    bbox_info = None
+    if args.use_bbox_info and os.path.exists(args.bbox_info):
+        try:
+            with open(args.bbox_info, 'r') as f:
+                bbox_info = json.load(f)
+            print(f"Loaded bounding box information for {len(bbox_info)} tracks")
+        except json.JSONDecodeError:
+            print(f"Error reading bbox information file: {args.bbox_info}")
+    elif args.use_bbox_info:
+        print(f"Bounding box information file not found: {args.bbox_info}")
+    
+    # Check if running in Colab by looking for environment variables
+    is_colab = 'COLAB_GPU' in os.environ or 'COLAB_TPU_ADDR' in os.environ
+    if is_colab:
+        print("Running in Google Colab environment")
+        
+        # In Colab, make sure the user is ready before starting the interactive part
+        print("\n" + "="*70)
+        print("IMPORTANT: You'll be shown images for each track and asked to name them.")
+        print("Make sure you can see both the images AND the input prompt.")
+        print("="*70)
+        input("Press Enter when you're ready to start the identity mapping process...")
+    
     # Interactive mapping
     print("\nDisplaying sample data for each track ID to help with identification")
+    print("Enter a name for each track ID or press Enter to skip")
+    
     for track_id in sorted(track_ids):
         # Convert NumPy int64 to native Python int
         track_id = int(track_id)
@@ -214,8 +350,16 @@ def main():
             frames_dir=args.frames_dir,
             num_samples=args.num_samples,
             crops_dir=args.crops_dir,
-            use_saved_crops=args.use_saved_crops
+            use_saved_crops=args.use_saved_crops,
+            bbox_info=bbox_info,
+            use_bbox_info=args.use_bbox_info
         )
+        
+        # In Colab, make the input prompt more visible
+        if is_colab:
+            print("\n" + "="*50)
+            print(f"PLEASE ENTER A NAME FOR TRACK ID {track_id}:")
+            print("="*50)
         
         # Ask for identity
         if track_id in identities:
@@ -223,11 +367,19 @@ def main():
             new_name = input(f"Track ID {track_id} (currently '{current}'): ")
             if new_name:
                 identities[track_id] = new_name
+                print(f"Set identity for track {track_id} to: {new_name}")
         else:
             name = input(f"Track ID {track_id}: ")
             if name:
                 identities[track_id] = name
-    
+                print(f"Set identity for track {track_id} to: {name}")
+            else:
+                print(f"No identity provided for track {track_id}")
+        
+        # If in Colab, close the figure to avoid overwhelming the browser
+        if is_colab:
+            plt.close('all')
+            
     # Convert any remaining NumPy int64 keys to Python int
     identities = {int(k): v for k, v in identities.items()}
     

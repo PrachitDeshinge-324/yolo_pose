@@ -9,6 +9,7 @@ from utils.gait_validator import GaitValidator
 import argparse
 import os
 import tqdm
+import json
 
 # Import DeepSORT libraries
 from deep_sort_realtime.deepsort_tracker import DeepSort
@@ -23,6 +24,8 @@ def parse_args():
                        help="Path to input video")
     parser.add_argument("--start_frame", type=int, default=150,
                        help="Starting frame number")
+    parser.add_argument("--end_frame", type=int, default=300,
+                       help="Ending frame number")
     parser.add_argument("--output_features", type=str, default="industrial_gait_features.csv",
                        help="Path to save extracted features")
     parser.add_argument("--model", type=str, default="gait_validation_results/gait_classifier_model.pkl",
@@ -43,6 +46,8 @@ def parse_args():
                     help="Save person crops for each track ID")
     parser.add_argument("--crops_dir", type=str, default="person_crops",
                     help="Directory to save person crops")
+    parser.add_argument("--save_bbox_info", action="store_true", default=True,
+                    help="Save bounding box information instead of actual crops")
     return parser.parse_args()
 
 
@@ -183,9 +188,12 @@ if __name__ == "__main__":
     next_track_id = 1
     yolo_id_to_track_id = {}
     
-    with tqdm.tqdm(total=total_frames-start_frame, desc="Processing frames") as pbar:
+    # Dictionary to store bounding box information
+    bbox_info = defaultdict(list)
+    
+    with tqdm.tqdm(total=args.end_frame-start_frame, desc="Processing frames") as pbar:
     # Process video with tracking
-        while cap.isOpened() and frame_count<300:
+        while cap.isOpened() and frame_count<args.end_frame:
             ret, frame = cap.read()
             if not ret:
                 break
@@ -237,6 +245,18 @@ if __name__ == "__main__":
                         y1_buf = max(0, y1 - int(h * BUFFER_RATIO))
                         x2_buf = min(frame.shape[1], x2 + int(w * BUFFER_RATIO))
                         y2_buf = min(frame.shape[0], y2 + int(h * BUFFER_RATIO))
+                        
+                        # Save bounding box information
+                        if args.save_bbox_info:
+                            bbox_info[int(track_id)].append({
+                                'track_id': int(track_id),  # Include track ID in each entry
+                                'frame_idx': frame_count,
+                                'x1': x1_buf,
+                                'y1': y1_buf, 
+                                'x2': x2_buf,
+                                'y2': y2_buf,
+                                'original_box': [int(x) for x in [x1, y1, x2, y2]]
+                            })
                                 
                         # Optionally show the buffered box with dashed line
                         if args.show_buffer:
@@ -324,7 +344,8 @@ if __name__ == "__main__":
                                             (int(smoothed_keypoints[p2][0]) + x1_buf, int(smoothed_keypoints[p2][1]) + y1_buf),
                                             color, 1)
                                     
-                            if args.save_crops:
+                            # If using traditional crops saving
+                            if args.save_crops and not args.save_bbox_info:
                                 # Create directory if it doesn't exist
                                 os.makedirs(args.crops_dir, exist_ok=True)
                                 
@@ -380,6 +401,13 @@ if __name__ == "__main__":
     # Export features
     gait_analyzer.export_features_csv(args.output_features)
     print(f"Exported gait features to {args.output_features}")
+    
+    # Save bounding box information to JSON file
+    if args.save_bbox_info:
+        bbox_file = os.path.join(os.path.dirname(args.output_features), "bbox_info.json")
+        with open(bbox_file, 'w') as f:
+            json.dump(bbox_info, f)
+        print(f"Saved bounding box information to {bbox_file}")
     
     # Export skeleton sequences for LSTM training if requested
     if args.export_sequences:
